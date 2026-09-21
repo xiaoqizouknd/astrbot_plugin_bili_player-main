@@ -1,0 +1,8 @@
+{
+  "pages": {
+    "accounts": {
+      "title": "账号与运行状态",
+      "description": "Bilibili 登录、媒体处理与交付预算概览。"
+    }
+  }
+}

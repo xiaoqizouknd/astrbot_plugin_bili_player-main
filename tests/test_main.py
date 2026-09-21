@@ -1,0 +1,2349 @@
+from __future__ import annotations
+
+import asyncio
+import importlib
+import json
+from pathlib import Path
+import sys
+import tempfile
+import types
+import unittest
+
+
+PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+REPOSITORY_ROOT = PLUGIN_ROOT.parent
+for path in (REPOSITORY_ROOT, PLUGIN_ROOT, Path(__file__).resolve().parent):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
+
+from support import ensure_aiohttp, _register_plugin_package
+
+
+def _install_astrbot_doubles() -> None:
+    """Provide the narrow AstrBot surface needed to import the entry point."""
+
+    if "astrbot" in sys.modules:
+        return
+
+    astrbot = types.ModuleType("astrbot")
+    api = types.ModuleType("astrbot.api")
+    event = types.ModuleType("astrbot.api.event")
+    event_filter = types.ModuleType("astrbot.api.event.filter")
+    message_components = types.ModuleType("astrbot.api.message_components")
+    star = types.ModuleType("astrbot.api.star")
+    web = types.ModuleType("astrbot.api.web")
+    core = types.ModuleType("astrbot.core")
+    agent = types.ModuleType("astrbot.core.agent")
+    tool = types.ModuleType("astrbot.core.agent.tool")
+    message = types.ModuleType("astrbot.core.message")
+    message_result = types.ModuleType("astrbot.core.message.message_event_result")
+    star_package = types.ModuleType("astrbot.core.star")
+    filter_package = types.ModuleType("astrbot.core.star.filter")
+    command = types.ModuleType("astrbot.core.star.filter.command")
+    utils = types.ModuleType("astrbot.core.utils")
+    session_waiter = types.ModuleType("astrbot.core.utils.session_waiter")
+
+    class AstrMessageEvent:
+        pass
+
+    class Filter:
+        class EventMessageType:
+            ALL = object()
+
+        @staticmethod
+        def command(_name: str, **_kwargs):
+            return lambda handler: handler
+
+        @staticmethod
+        def event_message_type(*_args, **_kwargs):
+            return lambda handler: handler
+
+        @staticmethod
+        def custom_filter(*_args, **_kwargs):
+            return lambda handler: handler
+
+    class CustomFilter:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+    class File:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class Record:
+        @staticmethod
+        def fromFileSystem(path):
+            return ("record", path)
+
+    class Video:
+        @staticmethod
+        def fromFileSystem(path):
+            return ("video", path)
+
+    class Context:
+        pass
+
+    class Star:
+        def __init__(self, context, config=None):
+            self.context = context
+            self.config = config
+
+    class StarTools:
+        @staticmethod
+        def get_data_dir(_: str):
+            return Path("/tmp")
+
+    class FunctionTool:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class MessageChain(list):
+        pass
+
+    class GreedyStr(str):
+        pass
+
+    class SessionController:
+        def __init__(self):
+            self.stopped = False
+            self._stopped = asyncio.Event()
+
+        def stop(self):
+            self.stopped = True
+            self._stopped.set()
+
+        async def wait_stopped(self):
+            await self._stopped.wait()
+
+    class SessionFilter:
+        def filter(self, event):
+            raise NotImplementedError
+
+    class SessionWaiter:
+        instances: list["SessionWaiter"] = []
+
+        def __init__(self, session_filter, session_id, record_history_chains):
+            self.session_filter = session_filter
+            self.session_id = session_id
+            self.record_history_chains = record_history_chains
+            self.session_controller = SessionController()
+            self.handler = None
+            self.registered = asyncio.Event()
+            self.instances.append(self)
+
+        async def register_wait(self, handler, *_args, **_kwargs):
+            self.handler = handler
+            self.registered.set()
+            await self.session_controller.wait_stopped()
+
+    class Logger:
+        def info(self, *_args, **_kwargs):
+            pass
+
+        def warning(self, *_args, **_kwargs):
+            pass
+
+        def exception(self, *_args, **_kwargs):
+            pass
+
+    def error_response(message, *, status_code=400, **_kwargs):
+        return {"kind": "error", "message": message, "status_code": status_code}
+
+    def json_response(payload, **_kwargs):
+        return {"kind": "json", "payload": payload}
+
+    def stream_response(content, **_kwargs):
+        return {"kind": "stream", "content": content}
+
+    event.AstrMessageEvent = AstrMessageEvent
+    event.filter = Filter
+    event_filter.CustomFilter = CustomFilter
+    message_components.File = File
+    message_components.Record = Record
+    message_components.Video = Video
+    star.Context = Context
+    star.Star = Star
+    star.StarTools = StarTools
+    web.error_response = error_response
+    web.json_response = json_response
+    web.request = types.SimpleNamespace(username="")
+    web.stream_response = stream_response
+    tool.FunctionTool = FunctionTool
+    message_result.MessageChain = MessageChain
+    command.GreedyStr = GreedyStr
+    session_waiter.SessionController = SessionController
+    session_waiter.SessionFilter = SessionFilter
+    session_waiter.SessionWaiter = SessionWaiter
+    session_waiter.FILTERS = []
+    api.logger = Logger()
+
+    sys.modules.update(
+        {
+            "astrbot": astrbot,
+            "astrbot.api": api,
+            "astrbot.api.event": event,
+            "astrbot.api.event.filter": event_filter,
+            "astrbot.api.message_components": message_components,
+            "astrbot.api.star": star,
+            "astrbot.api.web": web,
+            "astrbot.core": core,
+            "astrbot.core.agent": agent,
+            "astrbot.core.agent.tool": tool,
+            "astrbot.core.message": message,
+            "astrbot.core.message.message_event_result": message_result,
+            "astrbot.core.star": star_package,
+            "astrbot.core.star.filter": filter_package,
+            "astrbot.core.star.filter.command": command,
+            "astrbot.core.utils": utils,
+            "astrbot.core.utils.session_waiter": session_waiter,
+        }
+    )
+
+
+ensure_aiohttp()
+_install_astrbot_doubles()
+_register_plugin_package()
+listen_main = importlib.import_module("astrbot_plugin_bili_player.main")
+core_media = importlib.import_module("astrbot_plugin_bili_player.core.media")
+core_settings = importlib.import_module("astrbot_plugin_bili_player.core.settings")
+DOWNLOAD_MEDIA_LIMITS = core_media.DOWNLOAD_MEDIA_LIMITS
+VIDEO_MEDIA_LIMITS = core_media.VIDEO_MEDIA_LIMITS
+VOICE_MEDIA_LIMITS = core_media.VOICE_MEDIA_LIMITS
+AudioFormPreference = core_settings.AudioFormPreference
+MediaPreference = core_settings.MediaPreference
+
+
+class _Event(listen_main.AstrMessageEvent):
+    def __init__(
+        self,
+        session_id: str,
+        message: str = "",
+        *,
+        platform_name: str = "test",
+    ) -> None:
+        self.unified_msg_origin = session_id
+        self.message_str = message
+        self._platform_name = platform_name
+        self.call_llm = False
+        self.stopped = False
+
+    def get_platform_name(self) -> str:
+        return self._platform_name
+
+    def should_call_llm(self, value: bool) -> None:
+        self.call_llm = value
+
+    def stop_event(self) -> None:
+        self.stopped = True
+
+
+class _SendingEvent(_Event):
+    """Event double that records exact user-visible delivery order."""
+
+    def __init__(
+        self,
+        session_id: str,
+        message: str = "",
+        *,
+        platform_name: str = "test",
+    ) -> None:
+        super().__init__(session_id, message, platform_name=platform_name)
+        self.sent: list[object] = []
+
+    def plain_result(self, text: str) -> tuple[str, str]:
+        return ("plain", text)
+
+    async def send(self, message: object) -> None:
+        self.sent.append(message)
+
+
+class _Candidate:
+    def __init__(self, candidate_id: str, title: str) -> None:
+        self.candidate_id = candidate_id
+        self.bvid, raw_cid = candidate_id.split(":", maxsplit=1)
+        self.cid = int(raw_cid)
+        self.title = title
+        self.display_title = title
+        self.uploader = "fixture-up"
+        self.duration_ms = 180_000
+        self.search_title = f"搜索命中 {title}"
+        self.page_title = "正片"
+
+
+class _Snapshot:
+    def __init__(self, candidates: tuple[_Candidate, ...]) -> None:
+        self.search_id = "fixture-search"
+        self.query = "fixture query"
+        self.candidates = candidates
+        self.session_id = "chat-a"
+        self.expires_at = float("inf")
+        self.by_video_reference = False
+        self.fuzzy_query = False
+
+    def candidate_at(self, position: int) -> _Candidate | None:
+        if position < 1 or position > len(self.candidates):
+            return None
+        return self.candidates[position - 1]
+
+
+def _configure_selection_waits(plugin: object) -> None:
+    plugin._selection_waits = {}
+    plugin._llm_searches = {}
+    plugin._selection_lock = asyncio.Lock()
+    plugin._session_state = listen_main.SessionState()
+    plugin._initialized = True
+    plugin._settings = listen_main.PluginSettings()
+
+
+def _set_llm_search(
+    plugin: object, session_id: str, search_id: str, delivery: str = "video"
+) -> None:
+    plugin._llm_searches[session_id] = listen_main._LlmSearch(
+        expires_at=float("inf"), search_id=search_id, delivery=delivery
+    )
+
+
+def _llm_search_ids(plugin: object) -> dict[str, str | None]:
+    return {
+        session_id: lease.search_id
+        for session_id, lease in plugin._llm_searches.items()
+    }
+
+
+class MainContractTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        listen_main.FILTERS.clear()
+        listen_main.SessionWaiter.instances.clear()
+
+    def test_llm_tools_form_a_small_two_step_contract(self) -> None:
+        find_tool = listen_main.FindInBilibiliTool(types.SimpleNamespace())
+        deliver_tool = listen_main.DeliverMediaTool(types.SimpleNamespace())
+
+        self.assertEqual(find_tool.name, "find_in_bilibili")
+        self.assertEqual(
+            set(find_tool.parameters["properties"]),
+            {"title", "artist", "version", "delivery"},
+        )
+        self.assertEqual(find_tool.parameters["required"], ["title"])
+        self.assertIn("唱首歌", find_tool.description)
+        self.assertIn("作品名精确或完整匹配优先", find_tool.description)
+        self.assertIn("版本偏好", find_tool.description)
+        self.assertIn("不要猜测或发送", find_tool.description)
+
+        self.assertEqual(deliver_tool.name, "deliver_media")
+        self.assertEqual(
+            set(deliver_tool.parameters["properties"]),
+            {"search_id", "position", "let_user_choose"},
+        )
+        self.assertEqual(deliver_tool.parameters["required"], ["search_id", "position"])
+        self.assertEqual(
+            deliver_tool.parameters["properties"]["position"]["maximum"],
+            listen_main.SEARCH_LIMIT,
+        )
+        self.assertIn("find_in_bilibili", deliver_tool.description)
+
+    async def test_llm_tools_forward_only_their_own_contract(self) -> None:
+        calls: list[tuple[object, ...]] = []
+
+        class FakePlugin:
+            async def find_in_bilibili_for_llm(
+                self, event, title, *, artist, version, delivery
+            ):
+                calls.append(("find", event, title, artist, version, delivery))
+                return '{"status":"candidates"}'
+
+            async def deliver_media_for_llm(
+                self, event, search_id, position, *, let_user_choose
+            ):
+                calls.append(("deliver", event, search_id, position, let_user_choose))
+                return None
+
+        event = _Event("chat-a", "播放晴天")
+        context = types.SimpleNamespace(context=types.SimpleNamespace(event=event))
+
+        self.assertEqual(
+            await listen_main.FindInBilibiliTool(FakePlugin()).call(
+                context,
+                title="晴天",
+                artist="周杰伦",
+                version="原唱",
+            ),
+            '{"status":"candidates"}',
+        )
+        self.assertIsNone(
+            await listen_main.DeliverMediaTool(FakePlugin()).call(
+                context,
+                search_id="opaque-search",
+                position=2,
+            )
+        )
+        self.assertEqual(
+            calls,
+            [
+                ("find", event, "晴天", "周杰伦", "原唱", None),
+                ("deliver", event, "opaque-search", 2, False),
+            ],
+        )
+
+    def test_music_request_omits_only_default_recording_preferences_from_query(
+        self,
+    ) -> None:
+        for version in ("原版", "原唱", "Original"):
+            request = listen_main._BilibiliRequest.from_fields(
+                "日不落",
+                artist="蔡依林",
+                version=version,
+            )
+            self.assertEqual(request.query, "日不落 蔡依林")
+            self.assertTrue(request.prefers_canonical_recording)
+
+        live = listen_main._BilibiliRequest.from_fields(
+            "日不落",
+            artist="蔡依林",
+            version="Live",
+        )
+        self.assertEqual(live.query, "日不落 蔡依林 Live")
+        self.assertFalse(live.prefers_canonical_recording)
+
+    async def test_find_in_bilibili_returns_private_safe_candidates_without_chat_message(
+        self,
+    ) -> None:
+        first = _Candidate("BV1private:42", "温奕心 - 一路生花")
+        second = _Candidate("BV1private:43", "一路生花（AI 翻唱）")
+        snapshot = _Snapshot((first, second))
+
+        class FakeSearch:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            async def search(self, **kwargs):
+                self.calls.append(kwargs)
+                return snapshot
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = search = FakeSearch()
+        _configure_selection_waits(plugin)
+        event = _SendingEvent("chat-a")
+
+        result = await plugin.find_in_bilibili_for_llm(
+            event,
+            "一路生花",
+            artist="温奕心",
+            version="原唱",
+        )
+
+        self.assertEqual(
+            search.calls,
+            [
+                {
+                    "session_id": "chat-a",
+                    "query": "一路生花 温奕心",
+                    "song_title": None,
+                    "fuzzy_query": False,
+                }
+            ],
+        )
+        self.assertEqual(_llm_search_ids(plugin), {"chat-a": "fixture-search"})
+        self.assertEqual(event.sent, [])
+
+        payload = json.loads(result)
+        self.assertEqual(payload["status"], "candidates")
+        self.assertEqual(payload["search_id"], "fixture-search")
+        self.assertEqual(len(payload["candidates"]), 2)
+        self.assertEqual(
+            set(payload["candidates"][0]),
+            {"position", "title", "duration", "search_title", "page_title"},
+        )
+        serialized = json.dumps(payload, ensure_ascii=False)
+        for forbidden in (
+            "bvid",
+            "cid",
+            "uploader",
+            first.bvid,
+            str(first.cid),
+            first.uploader,
+        ):
+            self.assertNotIn(forbidden, serialized)
+
+    async def test_find_in_bilibili_uses_exact_path_for_bv_ids(self) -> None:
+        snapshot = _Snapshot((_Candidate("BV1Tyur6REd8:1", "指定视频"),))
+
+        class FakeSearch:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            async def search(self, **kwargs):
+                self.calls.append(kwargs)
+                return snapshot
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = search = FakeSearch()
+        _configure_selection_waits(plugin)
+        event = _SendingEvent("chat-a", "我要看 BV1Tyur6REd8")
+
+        result = await plugin.find_in_bilibili_for_llm(
+            event,
+            "BV1Tyur6REd8",
+            delivery="video",
+        )
+
+        self.assertIn('"status":"candidates"', result)
+        self.assertEqual(len(search.calls), 1)
+        call = search.calls[0]
+        self.assertEqual(call["query"], "BV1Tyur6REd8")
+        self.assertIsNone(call["song_title"])
+        self.assertEqual(call["video_ref"].bvid, "BV1Tyur6REd8")
+        self.assertEqual(event.sent, [])
+
+    async def test_new_message_cannot_reactivate_a_superseded_hidden_search(
+        self,
+    ) -> None:
+        snapshot = _Snapshot((_Candidate("BV1fixture:1", "晴天"),))
+        started = asyncio.Event()
+        finish = asyncio.Event()
+
+        class DelayedSearch:
+            async def search(self, **_kwargs):
+                started.set()
+                await finish.wait()
+                return snapshot
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = DelayedSearch()
+        _configure_selection_waits(plugin)
+        request_event = _SendingEvent("chat-a")
+        replacement_event = _SendingEvent("chat-a", "换一首")
+
+        pending = asyncio.create_task(
+            plugin.find_in_bilibili_for_llm(request_event, "晴天")
+        )
+        await started.wait()
+        await plugin.discard_llm_search_on_new_message(replacement_event)
+        finish.set()
+
+        result = json.loads(await pending)
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["message"], "歌曲请求已被新的消息替换")
+        self.assertEqual(plugin._llm_searches, {})
+
+    async def test_cancelled_hidden_search_releases_its_lease(self) -> None:
+        started = asyncio.Event()
+
+        class DelayedSearch:
+            async def search(self, **_kwargs):
+                started.set()
+                await asyncio.Event().wait()
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = DelayedSearch()
+        _configure_selection_waits(plugin)
+
+        pending = asyncio.create_task(
+            plugin.find_in_bilibili_for_llm(_SendingEvent("chat-a"), "晴天")
+        )
+        await started.wait()
+        pending.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await pending
+
+        self.assertEqual(plugin._llm_searches, {})
+
+    def test_hidden_search_leases_are_ttl_and_capacity_bounded(self) -> None:
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._llm_searches = {
+            "expired": listen_main._LlmSearch(expires_at=0.0, search_id="old")
+        }
+
+        for index in range(listen_main.SEARCH_SNAPSHOT_MAX_ENTRIES + 1):
+            plugin._begin_llm_search(f"chat-{index}")
+
+        self.assertNotIn("expired", plugin._llm_searches)
+        self.assertNotIn("chat-0", plugin._llm_searches)
+        self.assertEqual(
+            len(plugin._llm_searches), listen_main.SEARCH_SNAPSHOT_MAX_ENTRIES
+        )
+
+    async def test_deliver_media_consumes_only_the_live_hidden_snapshot(self) -> None:
+        candidate = _Candidate("BV1fixture:1", "温奕心 - 一路生花")
+        snapshot = _Snapshot((candidate,))
+        media = types.SimpleNamespace(
+            path=Path("/tmp/fixture.m4a"), filename="fixture.m4a"
+        )
+        result = types.SimpleNamespace(candidate=candidate, media=media)
+        released: list[object] = []
+
+        class FakeSearch:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            def snapshot(self, **kwargs):
+                self.calls.append(kwargs)
+                return snapshot
+
+        class FakeDelivery:
+            async def deliver(self, selected, *, limits, prefer_highest=False):
+                self.messages_at_start = list(event.sent)
+                self.selected = selected
+                self.limits = limits
+                return result
+
+        class FakeMedia:
+            async def release(self, released_media):
+                released.append(released_media)
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = search = FakeSearch()
+        plugin._delivery = delivery = FakeDelivery()
+        plugin._media = FakeMedia()
+        plugin._session_state = listen_main.SessionState()
+        plugin._llm_searches = {}
+        plugin._session_state = listen_main.SessionState()
+        _set_llm_search(plugin, "chat-a", snapshot.search_id, delivery="audio")
+        event = _SendingEvent("chat-a")
+
+        tool_result = await plugin.deliver_media_for_llm(event, snapshot.search_id, 1)
+
+        self.assertIsNone(tool_result)
+        self.assertEqual(plugin._llm_searches, {})
+        self.assertEqual(
+            search.calls,
+            [{"search_id": "fixture-search", "session_id": "chat-a"}],
+        )
+        self.assertIs(delivery.selected, candidate)
+        self.assertEqual(delivery.limits, VOICE_MEDIA_LIMITS)
+        self.assertEqual(
+            delivery.messages_at_start,
+            [("plain", "正在准备音频，请稍候。")],
+        )
+        self.assertEqual(
+            event.sent,
+            [
+                ("plain", "正在准备音频，请稍候。"),
+                listen_main.MessageChain([("record", Path("/tmp/fixture.m4a"))]),
+            ],
+        )
+        self.assertEqual(released, [media])
+
+    async def test_deliver_media_keeps_lease_when_delivery_fails(self) -> None:
+        candidate = _Candidate("BV1fixture:1", "温奕心 - 一路生花")
+        snapshot = _Snapshot((candidate,))
+        media = types.SimpleNamespace(
+            path=Path("/tmp/fixture.m4a"), filename="fixture.m4a"
+        )
+        result = types.SimpleNamespace(candidate=candidate, media=media)
+
+        class RetryableDelivery:
+            def __init__(self) -> None:
+                self.attempts = 0
+
+            async def deliver(self, *_args, **_kwargs):
+                self.attempts += 1
+                if self.attempts == 1:
+                    raise listen_main.DeliveryError("Bilibili 音频下载失败")
+                return result
+
+        class FakeSearch:
+            def snapshot(self, **_kwargs):
+                return snapshot
+
+        class FakeMedia:
+            async def release(self, _released_media):
+                pass
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = FakeSearch()
+        plugin._delivery = RetryableDelivery()
+        plugin._media = FakeMedia()
+        plugin._llm_searches = {}
+        plugin._session_state = listen_main.SessionState()
+        _set_llm_search(plugin, "chat-a", snapshot.search_id, delivery="audio")
+        event = _SendingEvent("chat-a")
+
+        first = await plugin.deliver_media_for_llm(event, snapshot.search_id, 1)
+        self.assertEqual(json.loads(first)["status"], "error")
+        # A failed delivery must keep the lease so the model can retry once.
+        self.assertEqual(_llm_search_ids(plugin), {"chat-a": snapshot.search_id})
+
+        second = await plugin.deliver_media_for_llm(event, snapshot.search_id, 1)
+        self.assertIsNone(second)
+        self.assertEqual(plugin._llm_searches, {})
+
+    def test_delivery_preparation_messages_match_the_transport(self) -> None:
+        self.assertEqual(
+            listen_main._delivery_preparation_message(listen_main._DeliveryMode.VOICE),
+            "正在准备音频，请稍候。",
+        )
+        self.assertEqual(
+            listen_main._delivery_preparation_message(
+                listen_main._DeliveryMode.DOWNLOAD
+            ),
+            "正在准备音频文件，请稍候。",
+        )
+        self.assertEqual(
+            listen_main._delivery_preparation_message(listen_main._DeliveryMode.VIDEO),
+            "正在准备视频，请稍候。",
+        )
+
+    def test_deliver_tool_description_assigns_feedback_to_the_plugin(self) -> None:
+        tool = listen_main.DeliverMediaTool(types.SimpleNamespace())
+
+        self.assertIn("插件会在下载、转码前主动发送", tool.description)
+        self.assertIn("不返回内容", tool.description)
+        self.assertNotIn("开场白", tool.description)
+        self.assertNotIn("收尾", tool.description)
+
+    async def test_llm_auto_delivery_defaults_to_video(self) -> None:
+        candidate = _Candidate("BV1fixture:1", "温奕心 - 一路生花")
+        snapshot = _Snapshot((candidate,))
+        media = types.SimpleNamespace(
+            path=Path("/tmp/fixture.mp4"), filename="fixture.mp4"
+        )
+        result = types.SimpleNamespace(candidate=candidate, media=media)
+
+        class FakeSearch:
+            def snapshot(self, **_kwargs):
+                return snapshot
+
+        class FakeDelivery:
+            async def deliver(self, *_args, **_kwargs):
+                raise AssertionError("default video delivery must not produce audio")
+
+            async def deliver_video(self, selected, *, limits):
+                self.selected = selected
+                self.limits = limits
+                return result
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = FakeSearch()
+        plugin._delivery = delivery = FakeDelivery()
+
+        class FakeMedia:
+            async def release(self, _released_media):
+                pass
+
+        plugin._media = FakeMedia()
+        _configure_selection_waits(plugin)
+        _set_llm_search(plugin, "chat-a", snapshot.search_id)
+        event = _SendingEvent("chat-a")
+
+        await plugin.deliver_media_for_llm(event, snapshot.search_id, 1)
+
+        self.assertIs(delivery.selected, candidate)
+        self.assertEqual(delivery.limits, core_settings.PluginLimits().video)
+        self.assertEqual(
+            event.sent,
+            [
+                ("plain", "正在准备视频，请稍候。"),
+                listen_main.MessageChain([("video", Path("/tmp/fixture.mp4"))]),
+            ],
+        )
+
+    async def test_llm_auto_listen_long_audio_falls_back_to_file(self) -> None:
+        candidate = _Candidate("BV1fixture:1", "温奕心 - 一路生花")
+        candidate.duration_ms = 16 * 60_000
+        snapshot = _Snapshot((candidate,))
+        media = types.SimpleNamespace(
+            path=Path("/tmp/fixture.m4a"), filename="fixture.m4a"
+        )
+        result = types.SimpleNamespace(candidate=candidate, media=media)
+
+        class FakeSearch:
+            def snapshot(self, **_kwargs):
+                return snapshot
+
+        class FakeDelivery:
+            async def deliver(self, selected, *, limits, prefer_highest=False):
+                self.selected = selected
+                self.limits = limits
+                return result
+
+            async def deliver_video(self, *_args, **_kwargs):
+                raise AssertionError("long audio must fall back to the audio file")
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = FakeSearch()
+        plugin._delivery = delivery = FakeDelivery()
+
+        class FakeMedia:
+            async def release(self, _released_media):
+                pass
+
+        plugin._media = FakeMedia()
+        _configure_selection_waits(plugin)
+        _set_llm_search(plugin, "chat-a", snapshot.search_id, delivery="audio")
+        event = _SendingEvent("chat-a")
+
+        result = await plugin.deliver_media_for_llm(event, snapshot.search_id, 1)
+
+        self.assertIsNone(result)
+        self.assertIs(delivery.selected, candidate)
+        self.assertEqual(delivery.limits, core_settings.PluginLimits().download)
+        self.assertEqual(
+            event.sent[0],
+            ("plain", "正在准备音频文件，请稍候。"),
+        )
+        self.assertEqual(len(event.sent), 2)
+        self.assertIsInstance(event.sent[1][0], listen_main.File)
+        self.assertEqual(
+            event.sent[1][0].kwargs,
+            {"name": "fixture.m4a", "file": str(Path("/tmp/fixture.m4a"))},
+        )
+
+    async def test_find_uses_a_debounced_message_as_one_fuzzy_query(
+        self,
+    ) -> None:
+        snapshot = _Snapshot((_Candidate("BV1fixture:1", "候选"),))
+        snapshot.fuzzy_query = True
+
+        class FakeSearch:
+            async def search(self, **kwargs):
+                self.calls = kwargs
+                return snapshot
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = search = FakeSearch()
+        _configure_selection_waits(plugin)
+        event = _SendingEvent(
+            "chat-a",
+            "我要看 BV1Q541167Qg BV1R34y1Q7J4 BV1cTYkzsEUF",
+        )
+
+        result = await plugin.find_in_bilibili_for_llm(
+            event, "BV1Q541167Qg", delivery="video"
+        )
+
+        payload = json.loads(result)
+        self.assertEqual(payload["status"], "candidates")
+        self.assertTrue(payload["requires_user_choice"])
+        self.assertTrue(search.calls["fuzzy_query"])
+        self.assertNotIn("video_ref", search.calls)
+        self.assertEqual(search.calls["query"], event.message_str)
+        self.assertIsNone(search.calls["song_title"])
+
+    async def test_fuzzy_query_forces_manual_selection_instead_of_first_video(
+        self,
+    ) -> None:
+        snapshot = _Snapshot((_Candidate("BV1fixture:1", "候选一"),))
+        snapshot.fuzzy_query = True
+
+        class FailingDelivery:
+            async def deliver_video(self, *_args, **_kwargs):
+                raise AssertionError("fuzzy query must not auto-deliver the first hit")
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = types.SimpleNamespace(snapshot=lambda **_kwargs: snapshot)
+        plugin._delivery = FailingDelivery()
+        plugin._media = types.SimpleNamespace()
+        _configure_selection_waits(plugin)
+        _set_llm_search(plugin, "chat-a", snapshot.search_id, delivery="video")
+        event = _SendingEvent("chat-a", "拼接请求")
+
+        result = await plugin.deliver_media_for_llm(event, snapshot.search_id, 1)
+
+        self.assertIsNone(result)
+        self.assertIn("按拼接后的消息搜索", event.sent[0][1])
+        self.assertIn("chat-a", plugin._selection_waits)
+        await plugin._cancel_selection_wait("chat-a")
+
+    async def test_find_rejects_a_second_search_in_the_same_turn(self) -> None:
+        class FakeSearch:
+            async def search(self, **kwargs):
+                self.calls = getattr(self, "calls", [])
+                self.calls.append(kwargs)
+                return _Snapshot((_Candidate("BV1fixture:1", "晴天"),))
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = search = FakeSearch()
+        _configure_selection_waits(plugin)
+        event = _SendingEvent("chat-a", "晴天")
+
+        first = await plugin.find_in_bilibili_for_llm(event, "晴天")
+        second = await plugin.find_in_bilibili_for_llm(event, "晴天")
+
+        self.assertEqual(json.loads(first)["status"], "candidates")
+        self.assertEqual(json.loads(second)["status"], "error")
+        self.assertIn("已有未完成的搜索", json.loads(second)["message"])
+        self.assertEqual(len(search.calls), 1)
+
+    async def test_find_with_audio_intent_keeps_long_candidates_for_file_fallback(
+        self,
+    ) -> None:
+        class FakeSearch:
+            async def search(self, **kwargs):
+                self.calls = kwargs
+                return _Snapshot((_Candidate("BV1fixture:1", "晴天"),))
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = search = FakeSearch()
+        _configure_selection_waits(plugin)
+        event = _SendingEvent("chat-a")
+
+        await plugin.find_in_bilibili_for_llm(event, "晴天", delivery="audio")
+
+        self.assertNotIn("max_duration_ms", search.calls)
+        self.assertEqual(search.calls["song_title"], "晴天")
+
+    async def test_find_with_video_intent_skips_music_semantic_filter(self) -> None:
+        class FakeSearch:
+            async def search(self, **kwargs):
+                self.calls = kwargs
+                return _Snapshot((_Candidate("BV1fixture:1", "指定视频"),))
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = search = FakeSearch()
+        _configure_selection_waits(plugin)
+        event = _SendingEvent("chat-a", "我要看晴天")
+
+        await plugin.find_in_bilibili_for_llm(event, "晴天", delivery="video")
+
+        self.assertIsNone(search.calls["song_title"])
+        self.assertNotIn("max_duration_ms", search.calls)
+
+    async def test_find_with_exact_reference_keeps_all_pages_for_user_choice(
+        self,
+    ) -> None:
+        class FakeSearch:
+            async def search(self, **kwargs):
+                self.calls = kwargs
+                return _Snapshot((_Candidate("BV1fixture:1", "第一页"),))
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = search = FakeSearch()
+        _configure_selection_waits(plugin)
+        event = _SendingEvent("chat-a")
+
+        await plugin.find_in_bilibili_for_llm(event, "BV1Q541167Qg", delivery="audio")
+
+        self.assertEqual(search.calls["video_ref"].bvid, "BV1Q541167Qg")
+        self.assertNotIn("max_duration_ms", search.calls)
+        self.assertIsNone(search.calls["song_title"])
+
+    async def test_deliver_exact_multi_page_reference_always_shows_candidates(
+        self,
+    ) -> None:
+        snapshot = _Snapshot(
+            (
+                _Candidate("BV1fixture:1", "第一页"),
+                _Candidate("BV1fixture:2", "第二页"),
+            )
+        )
+        snapshot.by_video_reference = True
+
+        class FailingDelivery:
+            async def deliver(self, *_args, **_kwargs):
+                raise AssertionError("exact multi-page video must ask the user")
+
+            async def deliver_video(self, *_args, **_kwargs):
+                raise AssertionError("exact multi-page video must ask the user")
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = types.SimpleNamespace(snapshot=lambda **_kwargs: snapshot)
+        plugin._delivery = FailingDelivery()
+        plugin._media = types.SimpleNamespace()
+        _configure_selection_waits(plugin)
+        _set_llm_search(plugin, "chat-a", snapshot.search_id)
+        event = _SendingEvent("chat-a", "我要看 BV1fixture")
+
+        result = await plugin.deliver_media_for_llm(
+            event,
+            snapshot.search_id,
+            1,
+            let_user_choose=False,
+        )
+
+        self.assertIsNone(result)
+        self.assertIn("Bilibili 搜索结果", event.sent[0][1])
+        self.assertIn("chat-a", plugin._selection_waits)
+        await plugin._cancel_selection_wait("chat-a")
+
+    async def test_watch_command_with_av_bv_shows_page_candidates(self) -> None:
+        snapshot = _Snapshot((_Candidate("BV1fixture:1", "第一页"),))
+
+        class FakeSearch:
+            async def search(self, **_kwargs):
+                return snapshot
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = FakeSearch()
+        _configure_selection_waits(plugin)
+        event = _SendingEvent("chat-a")
+
+        results = [
+            item
+            async for item in plugin.watch_command(
+                event, listen_main.GreedyStr("BV1Q541167Qg")
+            )
+        ]
+
+        self.assertEqual(len(results), 1)
+        self.assertIn("Bilibili 搜索结果", results[0][1])
+        self.assertIn("chat-a", plugin._selection_waits)
+        self.assertTrue(event.stopped)
+        await plugin._cancel_selection_wait("chat-a")
+
+    async def test_search_video_command_shares_the_selection_flow(self) -> None:
+        snapshot = _Snapshot((_Candidate("BV1fixture:1", "指定视频"),))
+
+        class FakeSearch:
+            async def search(self, **_kwargs):
+                return snapshot
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = FakeSearch()
+        _configure_selection_waits(plugin)
+        event = _SendingEvent("chat-a", "搜索视频 晴天")
+
+        results = [
+            item
+            async for item in plugin.search_video(event, listen_main.GreedyStr("晴天"))
+        ]
+
+        self.assertEqual(len(results), 1)
+        rendered = results[0][1]
+        self.assertIn("视频：回复“序号”", rendered)
+        self.assertIn("音频播放：回复“序号 音频”", rendered)
+        self.assertIn("音频下载：回复“序号 音频下载”", rendered)
+        self.assertTrue(event.call_llm)
+        self.assertTrue(event.stopped)
+        self.assertIn("chat-a", plugin._selection_waits)
+        await plugin._cancel_selection_wait("chat-a")
+
+    def test_structured_delivery_values_resolve_against_settings(self) -> None:
+        settings = listen_main.PluginSettings()
+        expected = listen_main._DeliveryMode
+
+        self.assertEqual(listen_main._resolve_delivery_key("auto", settings), "video")
+        self.assertEqual(listen_main._resolve_delivery_key("video", settings), "video")
+        self.assertEqual(listen_main._resolve_delivery_key("audio", settings), "audio")
+        self.assertEqual(
+            listen_main._resolve_delivery_key("download", settings), "download"
+        )
+        self.assertEqual(
+            listen_main._action_for_delivery_key("audio", settings), expected.VOICE
+        )
+        self.assertEqual(
+            listen_main._action_for_delivery_key("video", settings), expected.VIDEO
+        )
+        self.assertEqual(
+            listen_main._action_for_delivery_key("download", settings),
+            expected.DOWNLOAD,
+        )
+
+    def test_settings_defaults_and_auto_media_resolution(self) -> None:
+        settings = listen_main.PluginSettings()
+        self.assertTrue(settings.video_allowed)
+        self.assertTrue(settings.audio_allowed)
+        self.assertEqual(settings.default_media, "video")
+        self.assertEqual(settings.preferred_audio_form, "voice")
+
+        audio_first = listen_main.PluginSettings(
+            media_preference=MediaPreference.AUDIO_FIRST,
+            audio_form_preference=AudioFormPreference.FILE_FIRST,
+        )
+        self.assertEqual(
+            listen_main._resolve_delivery_key("auto", audio_first), "audio"
+        )
+        self.assertEqual(
+            listen_main._action_for_delivery_key("audio", audio_first),
+            listen_main._DeliveryMode.DOWNLOAD,
+        )
+
+        audio_only = listen_main.PluginSettings(
+            media_preference=MediaPreference.AUDIO_ONLY
+        )
+        with self.assertRaisesRegex(ValueError, "未开启视频"):
+            listen_main._resolve_delivery_key("video", audio_only)
+        self.assertEqual(
+            listen_main._resolve_delivery_key("audio", audio_only), "audio"
+        )
+
+        video_only = listen_main.PluginSettings(
+            media_preference=MediaPreference.VIDEO_ONLY
+        )
+        with self.assertRaisesRegex(ValueError, "未开启音频"):
+            listen_main._resolve_delivery_key("audio", video_only)
+
+    def test_configured_voice_duration_changes_file_fallback_threshold(self) -> None:
+        voice_limit = core_settings.PluginLimits.from_mapping(
+            {"voice_duration_minutes": 1}
+        ).voice
+        candidate = _Candidate("BV1fixture:1", "两分钟")
+        candidate.duration_ms = 2 * 60_000
+
+        self.assertTrue(
+            listen_main._selection_requires_download(
+                candidate, listen_main._DeliveryMode.VOICE, voice_limit
+            )
+        )
+
+        snapshot = _Snapshot((candidate,))
+        rendered = listen_main.format_search_results(
+            snapshot,
+            default_audio_form="voice",
+            voice_max_duration_ms=voice_limit.max_duration_ms,
+        )
+        self.assertIn("音频仅可下载", rendered)
+
+    def test_audio_only_selection_uses_configured_default_action(self) -> None:
+        voice_only = listen_main.PluginSettings(
+            media_preference=MediaPreference.AUDIO_ONLY,
+            audio_form_preference=AudioFormPreference.VOICE_FIRST,
+        )
+        file_only = listen_main.PluginSettings(
+            media_preference=MediaPreference.AUDIO_ONLY,
+            audio_form_preference=AudioFormPreference.FILE_FIRST,
+        )
+
+        self.assertEqual(
+            listen_main._parse_selection("1", voice_only),
+            (1, listen_main._DeliveryMode.VOICE),
+        )
+        self.assertEqual(
+            listen_main._parse_selection("1", file_only),
+            (1, listen_main._DeliveryMode.DOWNLOAD),
+        )
+        self.assertEqual(
+            listen_main._parse_selection("1 视频", voice_only),
+            (1, listen_main._DeliveryMode.VIDEO),
+        )
+
+    def test_format_results_respects_media_gates(self) -> None:
+        snapshot = _Snapshot((_Candidate("BV1fixture:1", "晴天"),))
+        video_only = listen_main.PluginSettings(
+            media_preference=MediaPreference.VIDEO_ONLY
+        )
+        audio_only = listen_main.PluginSettings(
+            media_preference=MediaPreference.AUDIO_ONLY
+        )
+
+        rendered_video = listen_main.format_search_results(
+            snapshot, video_enabled=True, audio_enabled=False
+        )
+        self.assertIn("发送视频：回复“序号”", rendered_video)
+        self.assertNotIn("音频", rendered_video.split("Bilibili 搜索结果：", 1)[1])
+
+        rendered_audio = listen_main.format_search_results(
+            snapshot,
+            video_enabled=False,
+            audio_enabled=True,
+            default_audio_form="voice",
+        )
+        self.assertIn("播放音频：回复“序号”或“序号 音频”", rendered_audio)
+        self.assertNotIn("视频", rendered_audio.split("Bilibili 搜索结果：", 1)[1])
+
+        self.assertTrue(video_only.video_allowed)
+        self.assertFalse(video_only.audio_allowed)
+        self.assertTrue(audio_only.audio_allowed)
+        self.assertFalse(audio_only.video_allowed)
+
+    async def test_deliver_media_rejects_a_hallucinated_hidden_search_id(self) -> None:
+        class FakeSearch:
+            def snapshot(self, **_kwargs):
+                raise AssertionError("hallucinated search ID must not reach the store")
+
+        class FailingDelivery:
+            async def deliver(self, _candidate, *, limits, prefer_highest=False):
+                raise AssertionError("hallucinated search ID must not deliver")
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = FakeSearch()
+        plugin._delivery = FailingDelivery()
+        plugin._media = types.SimpleNamespace()
+        plugin._llm_searches = {}
+        _set_llm_search(plugin, "chat-a", "fixture-search")
+        event = _SendingEvent("chat-a")
+
+        result = await plugin.deliver_media_for_llm(event, "invented-search", 1)
+
+        self.assertEqual(json.loads(result)["status"], "error")
+        self.assertEqual(_llm_search_ids(plugin), {"chat-a": "fixture-search"})
+        self.assertEqual(event.sent, [])
+
+    async def test_deliver_media_rejects_a_hallucinated_position(self) -> None:
+        snapshot = _Snapshot((_Candidate("BV1fixture:1", "晴天"),))
+
+        class FakeSearch:
+            def snapshot(self, **_kwargs):
+                return snapshot
+
+        class FailingDelivery:
+            async def deliver(self, _candidate, *, limits, prefer_highest=False):
+                raise AssertionError("a position outside the snapshot must not deliver")
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = FakeSearch()
+        plugin._delivery = FailingDelivery()
+        plugin._media = types.SimpleNamespace()
+        plugin._llm_searches = {}
+        _set_llm_search(plugin, "chat-a", snapshot.search_id)
+        event = _SendingEvent("chat-a")
+
+        result = await plugin.deliver_media_for_llm(event, snapshot.search_id, 2)
+
+        self.assertEqual(json.loads(result)["status"], "error")
+        self.assertEqual(_llm_search_ids(plugin), {"chat-a": "fixture-search"})
+        self.assertEqual(event.sent, [])
+
+    async def test_deliver_media_rejects_an_expired_hidden_snapshot(self) -> None:
+        class FakeSearch:
+            def snapshot(self, **_kwargs):
+                return None
+
+        class FailingDelivery:
+            async def deliver(self, _candidate, *, limits, prefer_highest=False):
+                raise AssertionError("expired search must not deliver")
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = FakeSearch()
+        plugin._delivery = FailingDelivery()
+        plugin._media = types.SimpleNamespace()
+        plugin._llm_searches = {}
+        _set_llm_search(plugin, "chat-a", "fixture-search")
+        event = _SendingEvent("chat-a")
+
+        result = await plugin.deliver_media_for_llm(event, "fixture-search", 1)
+
+        self.assertEqual(json.loads(result)["status"], "error")
+        self.assertEqual(plugin._llm_searches, {})
+        self.assertEqual(event.sent, [])
+
+    async def test_deliver_media_rejects_a_hidden_snapshot_from_another_session(
+        self,
+    ) -> None:
+        class FakeSearch:
+            def snapshot(self, **_kwargs):
+                raise AssertionError("another session must not access this search")
+
+        class FailingDelivery:
+            async def deliver(self, _candidate, *, limits, prefer_highest=False):
+                raise AssertionError("another session must not deliver")
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = FakeSearch()
+        plugin._delivery = FailingDelivery()
+        plugin._media = types.SimpleNamespace()
+        plugin._llm_searches = {}
+        _set_llm_search(plugin, "chat-a", "fixture-search")
+        event = _SendingEvent("chat-b")
+
+        result = await plugin.deliver_media_for_llm(event, "fixture-search", 1)
+
+        self.assertEqual(json.loads(result)["status"], "error")
+        self.assertEqual(_llm_search_ids(plugin), {"chat-a": "fixture-search"})
+        self.assertEqual(event.sent, [])
+
+    async def test_deliver_media_let_user_choose_presents_candidates_and_registers_selection(
+        self,
+    ) -> None:
+        snapshot = _Snapshot(
+            tuple(
+                _Candidate(f"BV1fixture:{position}", f"候选 {position}")
+                for position in range(1, listen_main.SEARCH_LIMIT + 1)
+            )
+        )
+
+        class FakeSearch:
+            def snapshot(self, **_kwargs):
+                return snapshot
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = FakeSearch()
+        _configure_selection_waits(plugin)
+        _set_llm_search(plugin, "chat-a", snapshot.search_id)
+        event = _SendingEvent("chat-a", "下载晴天")
+
+        result = await plugin.deliver_media_for_llm(
+            event,
+            snapshot.search_id,
+            1,
+            let_user_choose=True,
+        )
+
+        self.assertIsNone(result)
+        self.assertIn("Bilibili 搜索结果", event.sent[0][1])
+        self.assertIn("1. [3:00] 候选 1", event.sent[0][1])
+        self.assertIn("10. [3:00] 候选 10", event.sent[0][1])
+        self.assertNotIn("fixture-up", event.sent[0][1])
+        self.assertIn("chat-a", plugin._selection_waits)
+        self.assertEqual(len(listen_main.SessionWaiter.instances), 1)
+        self.assertTrue(listen_main.SessionWaiter.instances[0].registered.is_set())
+        await plugin._cancel_selection_wait("chat-a")
+
+    async def test_deliver_media_download_always_enters_the_selection_flow(
+        self,
+    ) -> None:
+        """A download request is never automatic, even without let_user_choose."""
+
+        snapshot = _Snapshot((_Candidate("BV1fixture:1", "晴天"),))
+
+        class FailingDelivery:
+            async def deliver(self, _candidate, *, limits, prefer_highest=False):
+                raise AssertionError("download must not auto-deliver")
+
+            async def deliver_video(self, _candidate, *, limits):
+                raise AssertionError("download must not auto-deliver")
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = types.SimpleNamespace(snapshot=lambda **_kwargs: snapshot)
+        plugin._delivery = FailingDelivery()
+        plugin._media = types.SimpleNamespace()
+        _configure_selection_waits(plugin)
+        _set_llm_search(plugin, "chat-a", snapshot.search_id, delivery="download")
+        event = _SendingEvent("chat-a", "下载晴天")
+
+        result = await plugin.deliver_media_for_llm(
+            event,
+            snapshot.search_id,
+            1,
+            let_user_choose=False,
+        )
+
+        self.assertIsNone(result)
+        self.assertIn("Bilibili 搜索结果", event.sent[0][1])
+        self.assertIn("音频下载：回复“序号 音频下载”", event.sent[0][1])
+        self.assertIn("chat-a", plugin._selection_waits)
+        await plugin._cancel_selection_wait("chat-a")
+
+    async def test_search_command_uses_a_bv_reference_from_its_query(self) -> None:
+        snapshot = _Snapshot((_Candidate("BV1fixture:1", "指定视频"),))
+
+        class FakeSearch:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            async def search(self, **kwargs):
+                self.calls.append(kwargs)
+                return snapshot
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = search = FakeSearch()
+        _configure_selection_waits(plugin)
+        event = _SendingEvent("chat-a", "搜索歌曲 BV1Q541167Qg")
+
+        results = [
+            result
+            async for result in plugin.search_song(
+                event, listen_main.GreedyStr("BV1Q541167Qg")
+            )
+        ]
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(search.calls[0]["query"], "BV1Q541167Qg")
+        self.assertEqual(search.calls[0]["video_ref"].bvid, "BV1Q541167Qg")
+        await plugin._cancel_selection_wait("chat-a")
+
+    async def test_listen_command_shows_candidates_for_user_selection(self) -> None:
+        snapshot = _Snapshot((_Candidate("BV1fixture:1", "晴天"),))
+
+        class FakeSearch:
+            async def search(self, **_kwargs):
+                return snapshot
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = FakeSearch()
+        _configure_selection_waits(plugin)
+        event = _SendingEvent("chat-a")
+
+        results = [
+            item
+            async for item in plugin.listen_command(
+                event, listen_main.GreedyStr("晴天")
+            )
+        ]
+
+        self.assertEqual(len(results), 1)
+        self.assertIn("Bilibili 搜索结果", results[0][1])
+        self.assertIn("chat-a", plugin._selection_waits)
+        self.assertTrue(event.stopped)
+        await plugin._cancel_selection_wait("chat-a")
+
+    async def test_watch_command_delivers_first_video_directly(self) -> None:
+        candidate = _Candidate("BV1fixture:1", "晴天")
+        snapshot = _Snapshot((candidate,))
+        media = types.SimpleNamespace(
+            path=Path("/tmp/fixture.mp4"), filename="fixture.mp4"
+        )
+        result = types.SimpleNamespace(candidate=candidate, media=media)
+
+        class FakeSearch:
+            async def search(self, **_kwargs):
+                return snapshot
+
+        class FakeDelivery:
+            async def deliver_video(self, selected, *, limits):
+                self.selected = selected
+                return result
+
+        class FakeMedia:
+            async def release(self, _released_media):
+                pass
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = FakeSearch()
+        plugin._delivery = delivery = FakeDelivery()
+        plugin._media = FakeMedia()
+        _configure_selection_waits(plugin)
+        event = _SendingEvent("chat-a")
+
+        results = [
+            item
+            async for item in plugin.watch_command(event, listen_main.GreedyStr("晴天"))
+        ]
+
+        self.assertEqual(len(results), 0)
+        self.assertTrue(event.stopped)
+        self.assertIs(delivery.selected, candidate)
+        self.assertEqual(
+            event.sent,
+            [
+                ("plain", "正在准备视频，请稍候。"),
+                listen_main.MessageChain([("video", Path("/tmp/fixture.mp4"))]),
+            ],
+        )
+
+    async def test_search_song_uses_the_same_selection_session(self) -> None:
+        snapshot = _Snapshot((_Candidate("BV1fixture:1", "晴天"),))
+
+        class FakeSearch:
+            async def search(self, **_kwargs):
+                return snapshot
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = FakeSearch()
+        _configure_selection_waits(plugin)
+        event = _SendingEvent("chat-a")
+
+        results = [
+            item
+            async for item in plugin.search_song(event, listen_main.GreedyStr("晴天"))
+        ]
+
+        self.assertEqual(len(results), 1)
+        self.assertIn("Bilibili 搜索结果", results[0][1])
+        self.assertTrue(event.call_llm)
+        self.assertTrue(event.stopped)
+        self.assertIn("chat-a", plugin._selection_waits)
+        await plugin._cancel_selection_wait("chat-a")
+
+    async def test_manual_selection_resolves_the_original_snapshot_once(self) -> None:
+        candidate = _Candidate("BV1fixture:2", "候选二")
+        snapshot = _Snapshot((_Candidate("BV1fixture:1", "候选一"), candidate))
+        media = types.SimpleNamespace(
+            path=Path("/tmp/fixture.m4a"), filename="fixture.m4a"
+        )
+        result = types.SimpleNamespace(candidate=candidate, media=media)
+        released: list[object] = []
+
+        class FakeSearch:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, str]] = []
+
+            def snapshot(self, **kwargs):
+                self.calls.append(kwargs)
+                return snapshot
+
+        class FakeDelivery:
+            async def deliver(self, selected, *, limits, prefer_highest=False):
+                self.selected = selected
+                self.limits = limits
+                return result
+
+        class FakeMedia:
+            async def release(self, released_media):
+                released.append(released_media)
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = search = FakeSearch()
+        plugin._delivery = delivery = FakeDelivery()
+        plugin._media = FakeMedia()
+        plugin._session_state = listen_main.SessionState()
+        controller = listen_main.SessionController()
+        reply = _SendingEvent("chat-a", "第2首 音频下载")
+
+        await plugin._deliver_selection(controller, reply, snapshot)
+
+        self.assertEqual(
+            search.calls,
+            [{"search_id": "fixture-search", "session_id": "chat-a"}],
+        )
+        self.assertIs(delivery.selected, candidate)
+        self.assertEqual(delivery.limits, core_settings.PluginLimits().download)
+        self.assertTrue(controller.stopped)
+        self.assertEqual(
+            reply.sent[0],
+            ("plain", "正在准备音频文件，请稍候。"),
+        )
+        component = reply.sent[1][0]
+        self.assertEqual(component.kwargs["name"], "fixture.m4a")
+        self.assertEqual(
+            Path(component.kwargs["file"]), Path("/tmp/fixture.m4a")
+        )
+        self.assertEqual(released, [media])
+
+    async def test_long_manual_voice_selection_keeps_wait_for_download(self) -> None:
+        candidate = _Candidate("BV1fixture:1", "长音频")
+        candidate.duration_ms = 16 * 60 * 1000
+        snapshot = _Snapshot((candidate,))
+
+        class FakeSearch:
+            def snapshot(self, **_kwargs):
+                return snapshot
+
+        class FailingDelivery:
+            async def deliver(self, _candidate, *, limits, prefer_highest=False):
+                raise AssertionError("long voice must not start a delivery")
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = FakeSearch()
+        plugin._delivery = FailingDelivery()
+        plugin._media = types.SimpleNamespace()
+        controller = listen_main.SessionController()
+        reply = _SendingEvent("chat-a", "1 音频")
+
+        await plugin._deliver_selection(controller, reply, snapshot)
+
+        self.assertFalse(controller.stopped)
+        self.assertEqual(
+            reply.sent,
+            [
+                (
+                    "plain",
+                    "第 1 首音频超过 15 分钟，无法直接播放；请回复“1”发视频，或回复“1 音频下载”下载音频文件。",
+                )
+            ],
+        )
+
+    async def test_expired_manual_selection_never_delivers_a_stale_candidate(
+        self,
+    ) -> None:
+        snapshot = _Snapshot((_Candidate("BV1fixture:1", "晴天"),))
+
+        class FakeSearch:
+            def snapshot(self, **_kwargs):
+                return None
+
+        class FailingDelivery:
+            async def deliver(self, _candidate, *, limits, prefer_highest=False):
+                raise AssertionError("expired selection must not deliver")
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = FakeSearch()
+        plugin._delivery = FailingDelivery()
+        plugin._media = types.SimpleNamespace()
+        controller = listen_main.SessionController()
+        reply = _SendingEvent("chat-a", "1 音频下载")
+
+        await plugin._deliver_selection(controller, reply, snapshot)
+
+        self.assertTrue(controller.stopped)
+        self.assertEqual(reply.sent, [("plain", "搜索结果已过期，请重新搜索。")])
+
+    async def test_selection_wait_timeout_notifies_then_cleans_up(self) -> None:
+        class TimedOutWaiter:
+            async def register_wait(self, *_args, **_kwargs):
+                raise TimeoutError
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        _configure_selection_waits(plugin)
+        source = _SendingEvent("chat-a")
+        snapshot = _Snapshot((_Candidate("BV1fixture:1", "晴天"),))
+        selection_filter = listen_main._SelectionSessionFilter("chat-a")
+        selection = listen_main._SelectionWait(
+            listen_main.SessionController(), asyncio.Event()
+        )
+        plugin._selection_waits["chat-a"] = selection
+        listen_main.FILTERS.append(selection_filter)
+
+        await plugin._run_selection_wait(
+            source_event=source,
+            snapshot=snapshot,
+            selection_filter=selection_filter,
+            waiter=TimedOutWaiter(),
+            selection=selection,
+        )
+
+        self.assertEqual(
+            source.sent,
+            [("plain", "没有收到选歌回复，本次搜索已结束。")],
+        )
+        self.assertTrue(selection.finished.is_set())
+        self.assertEqual(plugin._selection_waits, {})
+        self.assertNotIn(selection_filter, listen_main.FILTERS)
+
+    async def test_cancelled_selection_wait_stays_silent_on_timeout_race(self) -> None:
+        class TimedOutWaiter:
+            async def register_wait(self, *_args, **_kwargs):
+                raise TimeoutError
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        _configure_selection_waits(plugin)
+        source = _SendingEvent("chat-a")
+        snapshot = _Snapshot((_Candidate("BV1fixture:1", "晴天"),))
+        selection_filter = listen_main._SelectionSessionFilter("chat-a")
+        selection = listen_main._SelectionWait(
+            listen_main.SessionController(), asyncio.Event(), cancelled=True
+        )
+        plugin._selection_waits["chat-a"] = selection
+        listen_main.FILTERS.append(selection_filter)
+
+        await plugin._run_selection_wait(
+            source_event=source,
+            snapshot=snapshot,
+            selection_filter=selection_filter,
+            waiter=TimedOutWaiter(),
+            selection=selection,
+        )
+
+        self.assertEqual(source.sent, [])
+        self.assertTrue(selection.finished.is_set())
+        self.assertEqual(plugin._selection_waits, {})
+
+    async def test_new_non_selection_message_discards_wait_without_stopping_event(
+        self,
+    ) -> None:
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        _configure_selection_waits(plugin)
+        controller = listen_main.SessionController()
+        selection = listen_main._SelectionWait(controller, asyncio.Event())
+        plugin._selection_waits["chat-a"] = selection
+        _set_llm_search(plugin, "chat-a", "hidden-search")
+        event = _SendingEvent("chat-a", "再发一次")
+
+        discarding = asyncio.create_task(
+            plugin.discard_selection_wait_on_new_message(event)
+        )
+        await asyncio.sleep(0)
+
+        self.assertTrue(controller.stopped)
+        self.assertTrue(selection.cancelled)
+        self.assertFalse(event.stopped)
+        self.assertEqual(event.sent, [])
+        self.assertFalse(discarding.done())
+
+        plugin._finish_selection_wait("chat-a", selection)
+        await discarding
+        self.assertEqual(plugin._selection_waits, {})
+        self.assertEqual(plugin._llm_searches, {})
+
+    async def test_new_message_discards_hidden_candidates_without_claiming_event(
+        self,
+    ) -> None:
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._llm_searches = {}
+        _set_llm_search(plugin, "chat-a", "hidden-search")
+        event = _SendingEvent("chat-a", "换一首")
+
+        await plugin.discard_llm_search_on_new_message(event)
+
+        self.assertEqual(plugin._llm_searches, {})
+        self.assertFalse(event.stopped)
+        self.assertEqual(event.sent, [])
+
+    async def test_find_in_bilibili_cancels_an_old_selection_before_searching(
+        self,
+    ) -> None:
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        _configure_selection_waits(plugin)
+        old_snapshot = _Snapshot((_Candidate("BV1fixture:1", "旧候选"),))
+        await plugin._start_selection_wait(_SendingEvent("chat-a"), old_snapshot)
+        old_waiter = listen_main.SessionWaiter.instances[-1]
+
+        class FakeSearch:
+            async def search(self, **_kwargs):
+                self.old_waiter_stopped = old_waiter.session_controller.stopped
+                raise listen_main.MusicSearchError("没有找到可播放的歌曲")
+
+        plugin._search = search = FakeSearch()
+        event = _SendingEvent("chat-a", "再发一次")
+
+        result = await plugin.find_in_bilibili_for_llm(event, "晴天")
+
+        self.assertTrue(search.old_waiter_stopped)
+        self.assertEqual(plugin._selection_waits, {})
+        self.assertEqual(json.loads(result)["status"], "error")
+
+    async def test_search_command_cancels_an_old_selection_before_searching(
+        self,
+    ) -> None:
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        _configure_selection_waits(plugin)
+        old_snapshot = _Snapshot((_Candidate("BV1fixture:1", "旧候选"),))
+        await plugin._start_selection_wait(_SendingEvent("chat-a"), old_snapshot)
+        old_waiter = listen_main.SessionWaiter.instances[-1]
+        new_snapshot = _Snapshot((_Candidate("BV1fixture:2", "新候选"),))
+
+        class FakeSearch:
+            async def search(self, **_kwargs):
+                self.old_waiter_stopped = old_waiter.session_controller.stopped
+                return new_snapshot
+
+        plugin._search = search = FakeSearch()
+        event = _SendingEvent("chat-a", "搜索歌曲 晴天")
+
+        results = [
+            result
+            async for result in plugin.search_song(event, listen_main.GreedyStr("晴天"))
+        ]
+
+        self.assertTrue(search.old_waiter_stopped)
+        self.assertEqual(len(results), 1)
+        await plugin._cancel_selection_wait("chat-a")
+
+    async def test_send_delivery_falls_back_to_file_when_voice_component_fails(
+        self,
+    ) -> None:
+        released: list[object] = []
+
+        class FakeMedia:
+            ffmpeg_path = None
+
+            async def release(self, media):
+                released.append(media)
+
+        media_result = types.SimpleNamespace(
+            path=Path("/tmp/fixture.m4a"), filename="fixture.m4a"
+        )
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._media = FakeMedia()
+        event = _SendingEvent("chat-a")
+        result = types.SimpleNamespace(
+            media=media_result,
+            candidate=_Candidate("BV1fixture:1", "晴天"),
+        )
+        original = listen_main.Record.fromFileSystem
+
+        def fail_component_construction(_path):
+            raise RuntimeError("component failed")
+
+        listen_main.Record.fromFileSystem = staticmethod(fail_component_construction)
+        try:
+            await plugin._send_delivery(event, result, listen_main._DeliveryMode.VOICE)
+        finally:
+            listen_main.Record.fromFileSystem = staticmethod(original)
+
+        self.assertEqual(released, [media_result])
+        self.assertEqual(len(event.sent), 1)
+        component = event.sent[0][0]
+        self.assertIsInstance(component, listen_main.File)
+        self.assertEqual(
+            component.kwargs,
+            {"name": "fixture.m4a", "file": str(Path("/tmp/fixture.m4a"))},
+        )
+
+    async def test_weixin_oc_voice_delivery_uses_file_without_trying_record(
+        self,
+    ) -> None:
+        released: list[object] = []
+
+        class FakeMedia:
+            async def release(self, media):
+                released.append(media)
+
+        media_result = types.SimpleNamespace(
+            path=Path("/tmp/fixture.m4a"), filename="fixture.m4a"
+        )
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._media = FakeMedia()
+        event = _SendingEvent("chat-a", platform_name="weixin_oc")
+        result = types.SimpleNamespace(media=media_result)
+        original = listen_main.Record.fromFileSystem
+
+        def record_must_not_be_created(_path):
+            raise AssertionError("weixin_oc must use a file directly")
+
+        listen_main.Record.fromFileSystem = staticmethod(record_must_not_be_created)
+        try:
+            await plugin._send_delivery(event, result, listen_main._DeliveryMode.VOICE)
+        finally:
+            listen_main.Record.fromFileSystem = staticmethod(original)
+
+        self.assertEqual(released, [media_result])
+        self.assertEqual(len(event.sent), 1)
+        self.assertIsInstance(event.sent[0][0], listen_main.File)
+
+    async def test_send_delivery_retries_file_when_voice_send_is_rejected(self) -> None:
+        released: list[object] = []
+
+        class FakeMedia:
+            ffmpeg_path = None
+
+            async def release(self, media):
+                released.append(media)
+
+        class RecordRejectingEvent(_SendingEvent):
+            async def send(self, message: object) -> None:
+                if isinstance(message[0], tuple) and message[0][0] == "record":
+                    raise RuntimeError("record unsupported")
+                await super().send(message)
+
+        media_result = types.SimpleNamespace(
+            path=Path("/tmp/fixture.m4a"), filename="fixture.m4a"
+        )
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._media = FakeMedia()
+        event = RecordRejectingEvent("chat-a")
+        result = types.SimpleNamespace(
+            media=media_result,
+            candidate=_Candidate("BV1fixture:1", "晴天"),
+        )
+
+        await plugin._send_delivery(event, result, listen_main._DeliveryMode.VOICE)
+
+        self.assertEqual(released, [media_result])
+        self.assertEqual(len(event.sent), 1)
+        self.assertIsInstance(event.sent[0][0], listen_main.File)
+
+    async def test_send_onebot_voice_uses_local_file_uri_on_aiocqhttp(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        class FakeApi:
+            async def call_action(self, action: str, **payload):
+                calls.append({"action": action, **payload})
+
+        event = _SendingEvent("chat-a", platform_name="aiocqhttp")
+        event.bot = types.SimpleNamespace(api=FakeApi())
+        event.is_private_chat = lambda: False
+        event.get_group_id = lambda: "group-1"
+        media = types.SimpleNamespace(path=Path("/tmp/音乐 文件.m4a"))
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+
+        ok = await plugin._send_onebot_voice(event, media)
+
+        self.assertTrue(ok)
+        self.assertEqual(calls[0]["action"], "send_group_msg")
+        self.assertEqual(calls[0]["group_id"], "group-1")
+        segment = calls[0]["message"][0]
+        self.assertEqual(segment["type"], "record")
+        self.assertTrue(segment["data"]["file"].startswith("file:///"))
+
+    async def test_send_onebot_voice_skips_other_platforms(self) -> None:
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        media = types.SimpleNamespace(path=Path("/tmp/fixture.m4a"))
+        event = _SendingEvent("chat-a")
+        ok = await plugin._send_onebot_voice(event, media)
+        self.assertFalse(ok)
+
+    async def test_send_delivery_prefers_onebot_local_voice_on_aiocqhttp(self) -> None:
+        released: list[object] = []
+
+        class FakeMedia:
+            async def release(self, media):
+                released.append(media)
+
+        class FakeApi:
+            async def call_action(self, action: str, **payload):
+                pass
+
+        media_result = types.SimpleNamespace(
+            path=Path("/tmp/fixture.m4a"), filename="fixture.m4a"
+        )
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._media = FakeMedia()
+        event = _SendingEvent("chat-a", platform_name="aiocqhttp")
+        event.bot = types.SimpleNamespace(api=FakeApi())
+        event.is_private_chat = lambda: True
+        event.get_sender_id = lambda: "user-1"
+        result = types.SimpleNamespace(media=media_result)
+
+        await plugin._send_delivery(event, result, listen_main._DeliveryMode.VOICE)
+
+        self.assertEqual(released, [media_result])
+        self.assertEqual(event.sent, [])
+
+    def test_command_error_label_matches_the_user_command(self) -> None:
+        self.assertEqual(
+            listen_main._command_error_label("搜索视频 <关键词>"),
+            "搜索视频时发生错误",
+        )
+        self.assertEqual(
+            listen_main._command_error_label("搜索歌曲 <关键词>"),
+            "搜索歌曲时发生错误",
+        )
+
+    async def test_invalid_manual_selection_reply_keeps_the_same_wait(self) -> None:
+        controller = listen_main.SessionController()
+        reply = _SendingEvent("chat-a", "这不是一个有效序号")
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+
+        await plugin._deliver_selection(
+            controller,
+            reply,
+            _Snapshot((_Candidate("BV1fixture:1", "晴天"),)),
+        )
+
+        self.assertFalse(controller.stopped)
+        self.assertEqual(len(reply.sent), 1)
+        self.assertIn("请回复：", reply.sent[0][1])
+
+    def test_selection_parser_and_filter_share_one_grammar(self) -> None:
+        # 公开语法是“序号 / 序号 音频 / 序号 音频下载”；解析器同时宽容
+        # “下载/听/播放”等自然同义表达，避免带意图的回复被误读为裸序号。
+        expected = listen_main._DeliveryMode
+        self.assertEqual(listen_main._parse_selection("第2首"), (2, expected.VIDEO))
+        self.assertEqual(
+            listen_main._parse_selection("选第二个 下载"), (2, expected.DOWNLOAD)
+        )
+        self.assertEqual(
+            listen_main._parse_selection("我要下载第3首歌"), (3, expected.DOWNLOAD)
+        )
+        self.assertEqual(
+            listen_main._parse_selection("选第五首 下载"), (5, expected.DOWNLOAD)
+        )
+        self.assertEqual(listen_main._parse_selection("第10首"), (10, expected.VIDEO))
+        self.assertEqual(
+            listen_main._parse_selection("选第十首 下载"), (10, expected.DOWNLOAD)
+        )
+        self.assertEqual(listen_main._parse_selection("3 音频"), (3, expected.VOICE))
+        self.assertEqual(
+            listen_main._parse_selection("选第三首 音频"), (3, expected.VOICE)
+        )
+        self.assertEqual(
+            listen_main._parse_selection("3 音频下载"), (3, expected.DOWNLOAD)
+        )
+        self.assertEqual(listen_main._parse_selection("3 视频"), (3, expected.VIDEO))
+        self.assertIsNone(listen_main._parse_selection("第11首"))
+        self.assertIsNone(listen_main._parse_selection("选第十一首"))
+        self.assertIsNone(listen_main._parse_selection("下载第2首 听"))
+        self.assertIsNone(listen_main._parse_selection("我觉得第二首不错"))
+
+        selection_filter = listen_main._SelectionSessionFilter("chat-a")
+        self.assertEqual(
+            selection_filter.filter(_Event("chat-a", "第2首 音频下载")), "chat-a"
+        )
+        self.assertEqual(
+            selection_filter.filter(_Event("chat-a", "第2首 音频")), "chat-a"
+        )
+        self.assertEqual(selection_filter.filter(_Event("chat-a", "取消")), "chat-a")
+        self.assertEqual(selection_filter.filter(_Event("chat-a", "下载晴天")), "")
+        self.assertEqual(selection_filter.filter(_Event("chat-b", "1")), "")
+
+    def test_discard_wait_filter_is_pure_and_ignores_selection_replies(self) -> None:
+        selection_filter = listen_main._SelectionSessionFilter("chat-a")
+        listen_main.FILTERS.append(selection_filter)
+        discard_filter = listen_main._DiscardSelectionWaitFilter()
+
+        self.assertTrue(discard_filter.filter(_Event("chat-a", "再发一次"), None))
+        self.assertEqual(listen_main.FILTERS, [selection_filter])
+        self.assertFalse(discard_filter.filter(_Event("chat-a", "第1首"), None))
+        self.assertFalse(discard_filter.filter(_Event("chat-a", "取消"), None))
+        self.assertFalse(discard_filter.filter(_Event("chat-b", "再发一次"), None))
+
+    def test_login_views_never_expose_the_raw_qr_url(self) -> None:
+        snapshot = {
+            "session_id": "opaque-session",
+            "state": "waiting",
+            "qr_url": "https://secret.example.test/qr",
+        }
+        public = listen_main._public_login_snapshot(snapshot)
+        self.assertNotIn("qr_url", public)
+
+        original = listen_main._qr_png_data_url
+        listen_main._qr_png_data_url = lambda value: f"data:image/png;base64,{value}"
+        try:
+            with_qr = listen_main._public_login_snapshot(snapshot, include_qr=True)
+        finally:
+            listen_main._qr_png_data_url = original
+        self.assertNotIn("qr_url", with_qr)
+        self.assertEqual(
+            with_qr["qr_data_url"],
+            "data:image/png;base64,https://secret.example.test/qr",
+        )
+        self.assertNotIn("qr_url", listen_main._sse_data(public))
+
+    async def test_dashboard_api_key_cannot_access_account_status(self) -> None:
+        web = sys.modules["astrbot.api.web"]
+        web.request.username = "api_key:plugin-token"
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin.context = types.SimpleNamespace(
+            get_config=lambda: {"dashboard": {"username": "dashboard-admin"}}
+        )
+
+        response = await plugin.account_status()
+
+        self.assertEqual(response["kind"], "error")
+        self.assertEqual(response["status_code"], 403)
+
+    def test_account_routes_are_fixed_to_the_single_bilibili_account(self) -> None:
+        routes = []
+        context = types.SimpleNamespace(registered_web_apis=routes)
+
+        def register(route, handler, methods, description):
+            routes.append((route, handler, methods, description))
+
+        context.register_web_api = register
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin.context = context
+
+        plugin._register_account_routes()
+
+        self.assertEqual(
+            [route[0] for route in routes],
+            [
+                "/astrbot_plugin_bili_player/accounts/status",
+                "/astrbot_plugin_bili_player/accounts/login",
+                "/astrbot_plugin_bili_player/accounts/login/<session_id>/events",
+                "/astrbot_plugin_bili_player/accounts/login/<session_id>/cancel",
+                "/astrbot_plugin_bili_player/accounts/logout",
+                "/astrbot_plugin_bili_player/accounts/credentials",
+            ],
+        )
+
+    async def test_initialize_composes_the_two_music_tools(self) -> None:
+        created = types.SimpleNamespace(
+            accounts=None, bilibili=None, media=None, http=None
+        )
+
+        class FakeSession:
+            closed = False
+
+            async def close(self):
+                self.closed = True
+
+        class FakeAiohttp:
+            class TCPConnector:
+                def __init__(self, **_kwargs):
+                    pass
+
+            class ClientTimeout:
+                def __init__(self, **_kwargs):
+                    pass
+
+            @staticmethod
+            def ClientSession(**_kwargs):
+                created.http = FakeSession()
+                return created.http
+
+        class FakeAccounts:
+            def __init__(self, _store, authenticator):
+                created.accounts = self
+                self.authenticator = authenticator
+                self.closed = False
+
+            async def restore_credentials(self):
+                pass
+
+            def cookies(self):
+                return {"SESSDATA": "fixture"}
+
+            async def aclose(self):
+                self.closed = True
+
+        class FakeBilibili:
+            def __init__(self, _http, *, credentials_getter):
+                created.bilibili = self
+                self.credentials_getter = credentials_getter
+
+        class FakeMedia:
+            def __init__(self, _http, _cache_dir):
+                created.media = self
+                self.closed = False
+                self.reclaimed = False
+
+            async def reclaim_stale(self):
+                self.reclaimed = True
+
+            async def aclose(self):
+                self.closed = True
+
+        class FakeSearch:
+            def __init__(self, bilibili, _snapshots):
+                self.bilibili = bilibili
+
+        class FakeDelivery:
+            def __init__(self, *, bilibili, media):
+                self.bilibili = bilibili
+                self.media = media
+
+        class FakeContext:
+            def __init__(self):
+                self.registered_web_apis = []
+                self.tools = []
+
+            def register_web_api(self, route, handler, methods, description):
+                self.registered_web_apis.append((route, handler, methods, description))
+
+            def add_llm_tools(self, *tools):
+                self.tools.extend(tools)
+
+        originals = {
+            "aiohttp": listen_main.aiohttp,
+            "AccountService": listen_main.AccountService,
+            "BilibiliClient": listen_main.BilibiliClient,
+            "MediaStore": listen_main.MediaStore,
+            "SearchService": listen_main.SearchService,
+            "DeliveryService": listen_main.DeliveryService,
+            "StarTools": listen_main.StarTools,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                listen_main.aiohttp = FakeAiohttp
+                listen_main.AccountService = FakeAccounts
+                listen_main.BilibiliClient = FakeBilibili
+                listen_main.MediaStore = FakeMedia
+                listen_main.SearchService = FakeSearch
+                listen_main.DeliveryService = FakeDelivery
+                listen_main.StarTools = types.SimpleNamespace(
+                    get_data_dir=lambda _name: Path(directory)
+                )
+                context = FakeContext()
+                plugin = listen_main.ListenMusicPlugin(context)
+
+                await plugin.initialize()
+
+                self.assertIsInstance(
+                    created.accounts.authenticator, listen_main.BilibiliAuthenticator
+                )
+                self.assertEqual(
+                    created.bilibili.credentials_getter(), {"SESSDATA": "fixture"}
+                )
+                self.assertIs(plugin._search.bilibili, created.bilibili)
+                self.assertIs(plugin._delivery.bilibili, created.bilibili)
+                self.assertTrue(created.media.reclaimed)
+                self.assertEqual(
+                    [tool.name for tool in context.tools],
+                    ["find_in_bilibili", "deliver_media"],
+                )
+
+                await plugin.terminate()
+                self.assertTrue(created.media.closed)
+                self.assertTrue(created.accounts.closed)
+                self.assertTrue(created.http.closed)
+                self.assertEqual(context.registered_web_apis, [])
+            finally:
+                for name, original in originals.items():
+                    setattr(listen_main, name, original)
+
+    async def test_replacement_waits_for_the_old_waiter_cleanup(self) -> None:
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._selection_lock = asyncio.Lock()
+        plugin._initialized = True
+        old_controller = listen_main.SessionController()
+        old = listen_main._SelectionWait(old_controller, asyncio.Event())
+        new = listen_main._SelectionWait(
+            listen_main.SessionController(), asyncio.Event()
+        )
+        plugin._selection_waits = {"chat-a": old}
+
+        replacing = asyncio.create_task(plugin._replace_selection_wait("chat-a", new))
+        await asyncio.sleep(0)
+        self.assertTrue(old_controller.stopped)
+        self.assertFalse(replacing.done())
+
+        plugin._finish_selection_wait("chat-a", old)
+        await replacing
+        self.assertIs(plugin._selection_waits["chat-a"], new)
+
+    async def test_stopping_plugin_refuses_a_new_selection_wait(self) -> None:
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._selection_lock = asyncio.Lock()
+        plugin._selection_waits = {}
+        plugin._initialized = False
+        selection = listen_main._SelectionWait(
+            listen_main.SessionController(), asyncio.Event()
+        )
+
+        registered = await plugin._replace_selection_wait("chat-a", selection)
+
+        self.assertFalse(registered)
+        self.assertEqual(plugin._selection_waits, {})
+
+    # ---- 新增功能契约：限流 / 换一批 / 短链 / Cookie 导入 ----
+
+    async def test_search_command_rate_limits_one_chat_before_network_io(self) -> None:
+        class FailingSearch:
+            async def search(self, **_kwargs):
+                raise AssertionError("超限请求不得进入搜索")
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = FailingSearch()
+        _configure_selection_waits(plugin)
+        # 默认搜索预算为 6 次/分钟，全部耗尽后触发限流。
+        for _ in range(6):
+            plugin._session_state.check_search("chat-a")
+        event = _SendingEvent("chat-a")
+
+        results = [
+            item
+            async for item in plugin.search_song(event, listen_main.GreedyStr("晴天"))
+        ]
+
+        self.assertEqual(len(results), 1)
+        self.assertIn("太频繁", results[0][1])
+        self.assertTrue(event.stopped)
+
+    async def test_refresh_phrase_reuses_last_search_on_the_next_page(self) -> None:
+        snapshot = _Snapshot((_Candidate("BV1fixture:1", "晴天"),))
+
+        class FakeSearch:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            async def search(self, **kwargs):
+                self.calls.append(kwargs)
+                return snapshot
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = search = FakeSearch()
+        _configure_selection_waits(plugin)
+        plugin._session_state.remember_search(
+            "chat-a",
+            {"query": "晴天", "video_ref": None, "fuzzy": False, "page": 1},
+        )
+        event = _SendingEvent("chat-a", "换一批")
+
+        results = [item async for item in plugin.refresh_search_on_request(event)]
+
+        self.assertEqual(len(results), 1)
+        self.assertIn("Bilibili 搜索结果", results[0][1])
+        self.assertIn("想看更多结果", results[0][1])
+        self.assertEqual(search.calls[0]["query"], "晴天")
+        self.assertEqual(search.calls[0]["search_page"], 2)
+        self.assertTrue(event.call_llm)
+        self.assertTrue(event.stopped)
+        self.assertIn("chat-a", plugin._selection_waits)
+        memory = plugin._session_state.last_search("chat-a")
+        assert memory is not None
+        self.assertEqual(memory["page"], 2)
+        await plugin._cancel_selection_wait("chat-a")
+
+    async def test_refresh_phrase_without_memory_stays_silent(self) -> None:
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        _configure_selection_waits(plugin)
+        event = _SendingEvent("chat-a", "换一批")
+
+        results = [item async for item in plugin.refresh_search_on_request(event)]
+
+        self.assertEqual(results, [])
+        self.assertFalse(event.stopped)
+
+    async def test_llm_search_resolves_b23_short_link_to_an_exact_reference(
+        self,
+    ) -> None:
+        snapshot = _Snapshot((_Candidate("BV1Q541167Qg:1", "短链视频"),))
+
+        class FakeSearch:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            async def search(self, **kwargs):
+                self.calls.append(kwargs)
+                return snapshot
+
+        class FakeBilibili:
+            async def resolve_short_link(self, url: str) -> str:
+                self.resolved = url
+                return "https://www.bilibili.com/video/BV1Q541167Qg/"
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = search = FakeSearch()
+        plugin._bilibili = bilibili = FakeBilibili()
+        _configure_selection_waits(plugin)
+        event = _SendingEvent("chat-a", "我要看 https://b23.tv/abcDef")
+
+        result = await plugin.find_in_bilibili_for_llm(
+            event, "晴天", delivery="video"
+        )
+
+        payload = json.loads(result)
+        self.assertEqual(payload["status"], "candidates")
+        self.assertEqual(search.calls[0]["video_ref"].bvid, "BV1Q541167Qg")
+        self.assertEqual(bilibili.resolved, "https://b23.tv/abcDef")
+
+    async def test_llm_search_reports_unresolvable_short_links(self) -> None:
+        class FakeSearch:
+            async def search(self, **_kwargs):
+                raise AssertionError("坏短链不得进入搜索")
+
+        class FakeBilibili:
+            async def resolve_short_link(self, _url: str):
+                return None
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = FakeSearch()
+        plugin._bilibili = FakeBilibili()
+        _configure_selection_waits(plugin)
+        event = _SendingEvent("chat-a", "我要看 https://b23.tv/dead")
+
+        result = await plugin.find_in_bilibili_for_llm(
+            event, "晴天", delivery="video"
+        )
+
+        payload = json.loads(result)
+        self.assertEqual(payload["status"], "error")
+        self.assertIn("短链接", payload["message"])
+
+    async def test_cookie_import_reads_the_async_request_json(self) -> None:
+        imported: list[str] = []
+
+        class FakeAccounts:
+            async def import_credentials(self, cookie_text: str):
+                imported.append(cookie_text)
+                return types.SimpleNamespace(display_name="测试账号")
+
+        class FakeRequest:
+            username = "dashboard-admin"
+
+            async def json(self, default=None):
+                return {"cookies": "SESSDATA=fake; bili_jct=csrf"}
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin.context = types.SimpleNamespace(
+            get_config=lambda: {"dashboard": {"username": "dashboard-admin"}}
+        )
+        plugin._accounts = FakeAccounts()
+        original_request = listen_main.request
+        listen_main.request = FakeRequest()
+        try:
+            response = await plugin.account_import_credentials()
+        finally:
+            listen_main.request = original_request
+
+        self.assertEqual(response["kind"], "json")
+        self.assertEqual(imported, ["SESSDATA=fake; bili_jct=csrf"])
+        self.assertEqual(response["payload"]["display_name"], "测试账号")
+
+    def test_catalogue_hints_the_refresh_phrase(self) -> None:
+        snapshot = _Snapshot((_Candidate("BV1fixture:1", "晴天"),))
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        _configure_selection_waits(plugin)
+        rendered = plugin._format_selection_results(snapshot)
+
+        self.assertIn("想看更多结果：回复“换一批”", rendered)
+
+        snapshot.by_video_reference = True
+        rendered_exact = plugin._format_selection_results(snapshot)
+        self.assertNotIn("换一批", rendered_exact)
+
+    async def test_delivery_rate_limit_stops_the_selection_flow(self) -> None:
+        candidate = _Candidate("BV1fixture:1", "晴天")
+        snapshot = _Snapshot((candidate,))
+
+        class FakeSearch:
+            def snapshot(self, **_kwargs):
+                return snapshot
+
+        class FailingDelivery:
+            async def deliver(self, *_args, **_kwargs):
+                raise AssertionError("超限交付不得触发下载")
+
+        plugin = object.__new__(listen_main.ListenMusicPlugin)
+        plugin._search = FakeSearch()
+        plugin._delivery = FailingDelivery()
+        plugin._media = types.SimpleNamespace()
+        plugin._session_state = listen_main.SessionState()
+        for _ in range(3):
+            plugin._session_state.check_delivery("chat-a")
+        controller = listen_main.SessionController()
+        reply = _SendingEvent("chat-a", "1 音频下载")
+
+        await plugin._deliver_selection(controller, reply, snapshot)
+
+        # 限流只提示等待，选歌流程保留，用户稍后可再回序号。
+        self.assertFalse(controller.stopped)
+        self.assertEqual(len(reply.sent), 1)
+        self.assertIn("太频繁", reply.sent[0][1])
+
+
+if __name__ == "__main__":
+    unittest.main()

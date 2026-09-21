@@ -1,0 +1,101 @@
+{
+  "media_priority": {
+    "description": "用户没有明确说“看视频/听音频”时的默认媒体类型",
+    "type": "string",
+    "default": "video_first",
+    "options": [
+      "video_first",
+      "audio_first",
+      "video_only",
+      "audio_only"
+    ],
+    "labels": [
+      "默认视频，可发送音频",
+      "默认音频，可发送视频",
+      "仅视频",
+      "仅音频"
+    ],
+    "hint": "默认值只影响未明确媒体类型的请求；“仅视频/仅音频”会拒绝相反类型的显式请求。"
+  },
+  "audio_form_priority": {
+    "description": "音频未指定“直接播放/下载”时的优先形式",
+    "type": "string",
+    "default": "voice_first",
+    "options": [
+      "voice_first",
+      "file_first"
+    ],
+    "labels": [
+      "优先语音，超限或平台不支持时发文件",
+      "直接发音频文件"
+    ],
+    "hint": "语音最长 15 分钟、25 MiB；文件最长不限、100 MiB。"
+  },
+  "voice_duration_minutes": {
+    "description": "语音最长分钟数",
+    "type": "int",
+    "default": 15,
+    "slider": {
+      "min": 1,
+      "max": 60,
+      "step": 1
+    },
+    "hint": "超过后自动改发音频文件。"
+  },
+  "voice_size_mb": {
+    "description": "语音最大 MiB",
+    "type": "int",
+    "default": 25,
+    "slider": {
+      "min": 1,
+      "max": 100,
+      "step": 1
+    }
+  },
+  "video_duration_minutes": {
+    "description": "视频最长分钟数（0 不限）",
+    "type": "int",
+    "default": 0,
+    "slider": {
+      "min": 0,
+      "max": 600,
+      "step": 5
+    }
+  },
+  "video_size_mb": {
+    "description": "视频最大 MiB",
+    "type": "int",
+    "default": 50,
+    "slider": {
+      "min": 1,
+      "max": 500,
+      "step": 5
+    }
+  },
+  "download_duration_minutes": {
+    "description": "音频文件最长分钟数（0 不限）",
+    "type": "int",
+    "default": 0,
+    "slider": {
+      "min": 0,
+      "max": 600,
+      "step": 5
+    }
+  },
+  "download_size_mb": {
+    "description": "音频文件最大 MiB",
+    "type": "int",
+    "default": 50,
+    "slider": {
+      "min": 1,
+      "max": 500,
+      "step": 5
+    }
+  },
+  "show_uploader": {
+    "description": "搜索结果列表是否显示 up 主名",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后候选行附带 up 主名（最多 20 字截断），便于识别翻唱版本；LLM 侧证据始终不含上传者。"
+  }
+}
